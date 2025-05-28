@@ -1,0 +1,376 @@
+import argparse
+import os
+import sys
+import numpy as np
+import pandas as pd # For Timestamp and date operations
+
+# Add src to Python path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), 'src')))
+
+from data_fetcher import (get_coordinates, 
+                            get_5day_3hour_forecast, get_air_quality_index, get_timezone_str)
+from thermal_models import (calculate_utci, calculate_wbgt,
+                            calculate_mean_radiant_temperature, 
+                            calculate_mrt_with_solar_components,
+                            calculate_human_water_loss_jos3,
+                            get_jos3_time_series)
+from uhi_calculator import calculate_uhi_oke
+from simulation import run_monte_carlo_simulation
+from solar_calculator import calculate_solar_radiance
+from utils import interpolate_weather 
+from human_param_options import MET_ACTIVITIES, CLO_OPTIONS # Added
+
+from plotting import (plot_rectal_temperature_over_time,
+                      plot_water_consumption_over_time,
+                      plot_risk_progression)
+from risk_assessment import (classify_utci_risk, classify_wbgt_risk,
+                             classify_rectal_temp_risk, classify_aqi_risk,
+                             get_overall_risk,
+                             OVERALL_RISK_NONE_LOW, OVERALL_RISK_MODERATE,
+                             OVERALL_RISK_HIGH, OVERALL_RISK_VERY_HIGH, OVERALL_RISK_EXTREME,
+                             OVERALL_RISK_NOT_ASSESSED, RISK_AQI_UNKNOWN)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Meteorological and Thermal Comfort Analysis Tool.")
+
+    # Required arguments
+    parser.add_argument("--city", type=str, required=True, help="Name of the city.")
+    parser.add_argument(
+        "--api_key",
+        type=str,
+        default=os.environ.get("OPENWEATHER_API_KEY"),
+        help="OpenWeather API key. If not provided, uses OPENWEATHER_API_KEY environment variable."
+    )
+
+    # Optional user/scenario parameters
+    # parser.add_argument("--met", type=float, default=1.2, help="Metabolic rate [MET].") # Replaced by --activity_id
+    # parser.add_argument("--clo", type=float, default=0.5, help="Clothing insulation [clo].") # Replaced by --clothing_id
+    parser.add_argument("--globe_temp", type=float, help="Measured Globe Temperature [°C]. If provided, MRT will be calculated based on it for comparison and WBGT will be calculated.")
+    parser.add_argument("--population", type=int, help="City population for UHI calculation.")
+    parser.add_argument("--k_uhi", type=float, default=2.5, help="K-coefficient for UHI calculation.")
+    parser.add_argument("--units", type=str, default="metric", choices=["metric", "imperial"], help="Units for temperature (metric for Celsius, imperial for Fahrenheit).")
+    parser.add_argument("--duration", type=float, default=60.0, help="Exposure duration for JOS-3 time-series simulation (default: 60.0 minutes).")
+
+    # JOS-3 specific optional parameters
+    parser.add_argument("--age", type=int, default=20, help="Age for JOS-3 model.")
+    parser.add_argument("--weight", type=float, default=70.0, help="Weight in kg for JOS-3 model.")
+    parser.add_argument("--height", type=float, default=1.7, help="Height in m for JOS-3 model.")
+    parser.add_argument("--sex", type=str, default="male", choices=["male", "female"], help="Sex for JOS-3 model.")
+    # parser.add_argument("--posture", type=str, default="standing", choices=["standing", "sitting", "lying", "sedentary", "walking", "running"], help="Posture for JOS-3 model.") # Derived from activity_id
+
+    # New ID-based arguments for MET/CLO/Posture
+    parser.add_argument(
+        '--list_options',
+        action='store_true',
+        help="List available activity (MET) and clothing (CLO) options and exit."
+    )
+    parser.add_argument(
+        '--activity_id',
+        type=int,
+        default=19, # Default to "Rusten" (ID 19 from MET_ACTIVITIES)
+        help="ID of the activity (for MET value and posture). Use --list_options to see available activities."
+    )
+    parser.add_argument(
+        '--clothing_id',
+        type=int,
+        default=1,  # Default to "Korte broek en T-shirt (zomer)" (ID 1 from CLO_OPTIONS)
+        help="ID of the clothing ensemble (for CLO value). Use --list_options to see available clothing options."
+    )
+
+    # Monte Carlo simulation parameters
+    parser.add_argument("--run_simulation", action='store_true', help="Flag to run Monte Carlo simulation.")
+    parser.add_argument("--num_simulations", type=int, default=100, help="Number of Monte Carlo simulations.")
+    parser.add_argument("--clo_sim_mean", type=float, default=0.5, help="Mean for 'clo' normal distribution in simulation.")
+    parser.add_argument("--clo_sim_std", type=float, default=0.1, help="Std dev for 'clo' normal distribution in simulation.")
+    parser.add_argument("--clo_sim_min", type=float, default=0.1, help="Min clip value for 'clo' in simulation.")
+    parser.add_argument("--clo_sim_max", type=float, default=1.5, help="Max clip value for 'clo' in simulation.")
+    parser.add_argument("--met_sim_mean", type=float, default=1.2, help="Mean for 'met' normal distribution in simulation.")
+    parser.add_argument("--met_sim_std", type=float, default=0.2, help="Std dev for 'met' normal distribution in simulation.")
+    parser.add_argument("--met_sim_min", type=float, default=0.8, help="Min clip value for 'met' in simulation.")
+    parser.add_argument("--met_sim_max", type=float, default=2.5, help="Max clip value for 'met' in simulation.")
+
+    # Plotting and JOS-3 time series arguments
+    parser.add_argument('--generate_plots', action='store_true', help="Enable generation of plots.")
+    parser.add_argument('--plot_output_dir', type=str, default="plots", help="Directory to save plots.")
+    parser.add_argument('--jos3_output_interval', type=float, default=5.0, help="Output interval in minutes for JOS-3 time-series data.")
+    
+    # Forecast selection arguments
+    parser.add_argument('--forecast_day_offset', type=int, default=0, choices=range(5), help="Day offset for forecast (0=today, ..., 4).")
+    parser.add_argument('--forecast_time_index', type=int, default=0, choices=range(8), help="Index of the 3-hour time slot for the selected day (0-7).")
+
+    args = parser.parse_args()
+
+    # Handle --list_options
+    if args.list_options:
+        print("--- Available Activity (MET) Options ---")
+        for id_key, data in MET_ACTIVITIES.items():
+            speed_display = f"{data.get('speed_kmh', 'N/A'):<4} km/h" if data.get('speed_kmh') is not None else "N/A       "
+            print(f"  ID: {id_key:2d} | MET: {data['met']:4.1f} | Speed: {speed_display} | Posture: {data.get('posture', 'N/A'):<10s} | Description: {data['description']}")
+        print("\n--- Available Clothing (CLO) Options ---")
+        for id_key, data in CLO_OPTIONS.items():
+            print(f"  ID: {id_key:2d} | CLO: {data['clo']:.2f} | Description: {data['description']}")
+        sys.exit(0)
+
+    # Retrieve MET, CLO, and Posture from selected IDs for single-run calculations
+    selected_activity = MET_ACTIVITIES.get(args.activity_id)
+    selected_clothing = CLO_OPTIONS.get(args.clothing_id)
+
+    if selected_activity is None:
+        print(f"Error: Invalid --activity_id {args.activity_id}. Use --list_options to see available IDs.")
+        sys.exit(1)
+    if selected_clothing is None:
+        print(f"Error: Invalid --clothing_id {args.clothing_id}. Use --list_options to see available IDs.")
+        sys.exit(1)
+
+    met_value = selected_activity['met']
+    derived_posture = selected_activity.get('posture', 'standing') 
+    clo_value = selected_clothing['clo']
+
+    print(f"\n--- User Parameters for Single-Run Calculations (from IDs) ---")
+    print(f"Selected Activity (ID {args.activity_id}): {selected_activity['description']} (MET: {met_value}, Posture: {derived_posture})")
+    print(f"Selected Clothing (ID {args.clothing_id}): {selected_clothing['description']} (CLO: {clo_value})")
+
+    if args.generate_plots:
+        os.makedirs(args.plot_output_dir, exist_ok=True)
+        print(f"Plots will be saved to '{args.plot_output_dir}/'")
+
+    if args.api_key is None:
+        print("Error: OpenWeather API key not found. Please use --api_key or set OPENWEATHER_API_KEY.")
+        sys.exit(1)
+
+    # A. Initial Data Fetching
+    print(f"Fetching coordinates for {args.city}...")
+    coords = get_coordinates(args.city, args.api_key)
+    if not coords: sys.exit(1)
+    lat, lon = coords
+    print(f"Coordinates for {args.city}: Latitude={lat:.2f}, Longitude={lon:.2f}")
+
+    print(f"Fetching 5-day/3-hour forecast for {args.city}...")
+    full_forecast_data = get_5day_3hour_forecast(lat, lon, args.api_key, args.units)
+    if not full_forecast_data: sys.exit(1)
+
+    print(f"Fetching Air Quality Index (AQI) for {args.city}...")
+    aqi_data = get_air_quality_index(lat, lon, args.api_key)
+    current_aqi_value = aqi_data.get('aqi') if aqi_data else None
+    _, aqi_risk_num = classify_aqi_risk(current_aqi_value) if current_aqi_value is not None else (None, RISK_AQI_UNKNOWN)
+    print(f"Current AQI: {current_aqi_value if current_aqi_value else 'N/A'} "
+          f"(Risk Category: {classify_aqi_risk(current_aqi_value)[0] if current_aqi_value is not None else 'N/A'}, Level: {aqi_risk_num if aqi_risk_num != RISK_AQI_UNKNOWN else 'N/A'})")
+
+    # B. Select Target 3-Hour Forecast Slot
+    print(f"\nSelecting forecast data for day offset {args.forecast_day_offset}, time index {args.forecast_time_index}...")
+    slots_by_day = {}
+    for slot in full_forecast_data:
+        day = pd.Timestamp(slot['dt_txt'], tz='UTC').date()
+        if day not in slots_by_day: slots_by_day[day] = []
+        slots_by_day[day].append(slot)
+    
+    sorted_days = sorted(slots_by_day.keys())
+    if args.forecast_day_offset >= len(sorted_days):
+        print(f"Error: Invalid forecast day offset. Max offset: {len(sorted_days) - 1}.")
+        sys.exit(1)
+    
+    target_day_key = sorted_days[args.forecast_day_offset]
+    day_slots = slots_by_day[target_day_key]
+
+    if args.forecast_time_index >= len(day_slots):
+        print(f"Error: Invalid forecast time index for day {target_day_key}. Max index: {len(day_slots) - 1}.")
+        sys.exit(1)
+    
+    target_slot_data = day_slots[args.forecast_time_index]
+    initial_tdb = target_slot_data['temp']
+    initial_rh = target_slot_data['humidity']
+    initial_v_weather = target_slot_data['wind_speed']
+    initial_clouds = target_slot_data['clouds']
+    slot_dt_txt_utc_str = target_slot_data['dt_txt']
+
+    if initial_tdb is None or initial_rh is None or initial_v_weather is None or initial_clouds is None:
+        print(f"Error: Essential weather data missing from selected forecast slot: {slot_dt_txt_utc_str}.")
+        sys.exit(1)
+    
+    local_timezone_str = get_timezone_str(lat, lon) or 'UTC'
+    slot_start_local_dt = pd.Timestamp(slot_dt_txt_utc_str, tz='UTC').tz_convert(local_timezone_str)
+
+    print(f"\n--- Conditions for Selected Forecast Slot ({slot_start_local_dt.strftime('%Y-%m-%d %H:%M:%S %Z')}) ---")
+    print(f"Air Temperature (tdb): {initial_tdb:.2f} °C, Relative Humidity (rh): {initial_rh:.1f} %, Wind Speed (v): {initial_v_weather:.2f} m/s, Cloud Cover: {initial_clouds} %")
+
+    # C. Calculate Solar Radiation & MRT for the Start of the Selected Slot
+    print("\n--- Solar Radiation & Initial MRT Calculation ---")
+    aqi_for_solar = current_aqi_value if current_aqi_value is not None else 3
+    initial_solar_rad_output = calculate_solar_radiance(
+        lat, lon, slot_start_local_dt.strftime('%Y-%m-%d %H:%M:%S'), initial_clouds, aqi_for_solar
+    )
+    
+    initial_tr_solar = initial_tdb 
+    if initial_solar_rad_output and initial_solar_rad_output['solar_elevation'] > 0:
+        print(f"Calculated Solar Radiation (Initial): GHI={initial_solar_rad_output['ghi']:.2f} W/m^2, DNI={initial_solar_rad_output['dni']:.2f} W/m^2, Zenith={initial_solar_rad_output['zenith']:.2f}°")
+        tr_calc = calculate_mrt_with_solar_components(
+            tdb=initial_tdb, v_person=(initial_v_weather * 0.7), clo_value=clo_value, posture=derived_posture,
+            ghi=initial_solar_rad_output['ghi'], dni=initial_solar_rad_output['dni'], 
+            solar_zenith_deg=initial_solar_rad_output['zenith'], 
+            solar_azimuth_deg=initial_solar_rad_output.get('solar_azimuth', 0)
+        )
+        if tr_calc is not None: initial_tr_solar = tr_calc
+        else: print("Initial MRT calculation from solar components failed. Using tr = tdb.")
+    else:
+        print("Sun is down or initial solar radiation data not available. Using tr = tdb for initial MRT.")
+    print(f"Initial Mean Radiant Temperature (Tr) for calculations: {initial_tr_solar:.2f} °C")
+
+    static_wbgt_risk_num = None
+    wbgt_val_initial_slot = None
+    if args.globe_temp is not None:
+        mrt_from_globe = calculate_mean_radiant_temperature(tg=args.globe_temp, ta=initial_tdb, v=(initial_v_weather * 0.7))
+        if mrt_from_globe is not None: print(f"Comparative MRT from provided Globe Temp: {mrt_from_globe:.2f}°C")
+        wbgt_val_initial_slot = calculate_wbgt(tdb=initial_tdb, tg=args.globe_temp, rh=initial_rh, v=initial_v_weather)
+        if wbgt_val_initial_slot is not None:
+            _, static_wbgt_risk_num = classify_wbgt_risk(wbgt_val_initial_slot)
+            print(f"WBGT (from Globe Temp): {wbgt_val_initial_slot:.2f}°C, Risk Level: {static_wbgt_risk_num if static_wbgt_risk_num is not None else 'N/A'}")
+
+    # D. Interpolate Weather Data
+    print(f"\nInterpolating weather data for {args.duration} minutes from {slot_start_local_dt.strftime('%Y-%m-%d %H:%M:%S %Z')}...")
+    interp_end_dt = slot_start_local_dt + pd.Timedelta(minutes=args.duration)
+    interpolated_weather_list = interpolate_weather(full_forecast_data, slot_start_local_dt, interp_end_dt, int(args.jos3_output_interval))
+    if not interpolated_weather_list: print("Warning: Weather interpolation failed. Time-stepped analysis will be skipped.")
+    else: print(f"Successfully interpolated weather into {len(interpolated_weather_list)} steps.")
+
+    # E. Time-Stepped UTCI & Environmental Risk
+    if interpolated_weather_list:
+        print("\nCalculating time-stepped UTCI and environmental risk...")
+        utci_series_for_plot, overall_risk_level_series_env_only, time_points_series_env_local_dt = [], [], []
+        for entry in interpolated_weather_list:
+            current_dt_local_step = entry['time']
+            tdb_step, rh_step, v_step, clouds_step = entry['temp'], entry['rh'], entry['wind_speed'], entry['clouds']
+            solar_rad_step = calculate_solar_radiance(lat, lon, current_dt_local_step.strftime('%Y-%m-%d %H:%M:%S'), clouds_step, current_aqi_value if current_aqi_value is not None else 3)
+            ghi_s, dni_s, solar_zenith_s, solar_azimuth_s_step = (0,0,90,0)
+            if solar_rad_step and solar_rad_step['solar_elevation'] > 0:
+                ghi_s, dni_s, solar_zenith_s, solar_azimuth_s_step = solar_rad_step['ghi'], solar_rad_step['dni'], solar_rad_step['zenith'], solar_rad_step.get('solar_azimuth',0)
+            
+            tr_step = calculate_mrt_with_solar_components(tdb_step, v_step * 0.7, clo_value, derived_posture, ghi_s, dni_s, solar_zenith_s, solar_azimuth_s_step) or tdb_step
+            utci_step = calculate_utci(tdb_step, tr_step, v_step, rh_step, met=met_value, clo=clo_value)
+            utci_series_for_plot.append(utci_step)
+            _, utci_risk_num_step = classify_utci_risk(utci_step) if utci_step is not None else (None, None)
+            _, overall_num_step = get_overall_risk(utci_risk_num_step, static_wbgt_risk_num, None, aqi_risk_num)
+            overall_risk_level_series_env_only.append(overall_num_step)
+            time_points_series_env_local_dt.append(current_dt_local_step)
+        
+        valid_utci_s = [u for u in utci_series_for_plot if u is not None]
+        if valid_utci_s: print(f"Time-stepped UTCI: Min={np.min(valid_utci_s):.2f}, Max={np.max(valid_utci_s):.2f}, Avg={np.mean(valid_utci_s):.2f} °C")
+
+    # F. Scalar Calcs & JOS-3 Single Run (using initial slot conditions and selected/derived MET, CLO, Posture)
+    print("\n--- Scalar & JOS-3 Time-Series Calculations (based on initial slot conditions) ---")
+    print(f"Using selected activity/clothing: MET={met_value}, CLO={clo_value}, Posture={derived_posture}")
+    print(f"Initial conditions: Tdb={initial_tdb:.2f}, Tr={initial_tr_solar:.2f}, RH={initial_rh:.1f}, v={initial_v_weather:.2f}")
+
+    utci_val_initial_slot, (_, utci_risk_num_initial) = (None, (None, None))
+    temp_utci_val = calculate_utci(initial_tdb, initial_tr_solar, initial_v_weather, initial_rh, met=met_value, clo=clo_value)
+    if temp_utci_val is not None:
+        utci_val_initial_slot = temp_utci_val
+        _, utci_risk_num_initial = classify_utci_risk(utci_val_initial_slot)
+        print(f"UTCI (Initial Slot): {utci_val_initial_slot:.2f}°C, Risk Level: {utci_risk_num_initial}")
+    else: print("UTCI calculation for initial slot failed.")
+    
+    if args.globe_temp is None and wbgt_val_initial_slot is None: print("WBGT not calculated (no globe_temp).")
+
+    # Use derived_posture for JOS-3 kwargs, pass met_value and clo_value directly
+    jos3_user_params = {"age": args.age, "weight": args.weight, "height": args.height, "sex": args.sex}
+    
+    water_loss_scalar = calculate_human_water_loss_jos3(
+        tdb=initial_tdb, tr=initial_tr_solar, v=initial_v_weather, rh=initial_rh,
+        met=met_value, clo=clo_value, posture=derived_posture, 
+        duration=args.duration, **jos3_user_params
+    )
+    if water_loss_scalar:
+        print("JOS-3 Scalar Water Loss (rates at end of duration):")
+        for k, v in water_loss_scalar.items(): print(f"  {k}: {v:.2f} g/h" if isinstance(v, (int,float)) else f"  {k}: {v}")
+    else: print("JOS-3 scalar water loss calculation failed.")
+
+    if args.population is not None:
+        uhi = calculate_uhi_oke(args.population, args.k_uhi)
+        if uhi is not None: print(f"UHI: {uhi:.2f}°C")
+        else: print("UHI calculation failed.")
+    else: print("UHI not calculated (no population).")
+
+    if args.generate_plots:
+        jos3_series_data = get_jos3_time_series(
+            tdb=initial_tdb, tr=initial_tr_solar, v=initial_v_weather, rh=initial_rh, 
+            met=met_value, clo=clo_value, posture=derived_posture,
+            duration_minutes=args.duration, 
+            output_interval_minutes=args.jos3_output_interval, 
+            **jos3_user_params
+        )
+        if jos3_series_data:
+            jos3_time_points = jos3_series_data["time_minutes"]
+            rectal_temp_series = jos3_series_data["rectal_temp_c"]
+            overall_risk_with_trect = [get_overall_risk(utci_risk_num_initial, static_wbgt_risk_num, classify_rectal_temp_risk(t_rect)[1], aqi_risk_num)[1] for t_rect in rectal_temp_series]
+            
+            if overall_risk_with_trect:
+                 print(f"Risk progression (JOS-3 based): Initial Level={overall_risk_with_trect[0]}, Final Level={overall_risk_with_trect[-1]}")
+            
+            risk_map = {v: k for k, v in globals().items() if k.startswith("OVERALL_RISK_") and isinstance(v,int)} # Auto-generate map
+            plot_risk_progression(jos3_time_points, overall_risk_with_trect, os.path.join(args.plot_output_dir, "risk_progression_jos3_plot.png"), risk_map)
+        else: print("Could not generate JOS-3 time-series for risk progression plot.")
+
+    # G. Monte Carlo Simulation
+    if args.run_simulation:
+        print("\n--- Monte Carlo Simulation Results ---")
+        # MC simulations use --clo_sim_mean/std and --met_sim_mean/std, not the ID-selected values.
+        
+        base_sim_params_mc_utci = {'tdb': initial_tdb, 'tr': initial_tr_solar, 'v': initial_v_weather, 'rh': initial_rh}
+        # For JOS-3 MC, we use the general jos3_user_params (age, weight, sex) 
+        # and derived_posture (from activity_id) for consistency, 
+        # as MET and CLO are varied based on their specific MC args.
+        base_jos3_sim_params_mc = {
+            'tdb': initial_tdb, 'tr': initial_tr_solar, 'v': initial_v_weather, 'rh': initial_rh,
+            **jos3_user_params, # age, weight, sex
+            'posture': derived_posture 
+        }
+
+        varied_sim_params_specs = [
+            {"name": "clo", "distribution_type": "normal", "dist_params": {"mean": args.clo_sim_mean, "std": args.clo_sim_std, "min_val": args.clo_sim_min, "max_val": args.clo_sim_max}},
+            {"name": "met", "distribution_type": "normal", "dist_params": {"mean": args.met_sim_mean, "std": args.met_sim_std, "min_val": args.met_sim_min, "max_val": args.met_sim_max}}
+        ]
+
+        print("\nSimulating UTCI (scalar)...")
+        utci_sim_results = run_monte_carlo_simulation(calculate_utci, base_sim_params_mc_utci, varied_sim_params_specs, args.num_simulations)
+        if utci_sim_results:
+            valid_utci = [r for r in utci_sim_results if r is not None]
+            if valid_utci: print(f"  UTCI Simulation Summary (Scalar, {len(valid_utci)} valid results): Mean={np.mean(valid_utci):.2f}°C, Median={np.median(valid_utci):.2f}°C")
+            else: print("  No valid UTCI results from simulation.")
+        else: print("  UTCI simulation failed.")
+
+        base_jos3_scalar_mc_params = {**base_jos3_sim_params_mc, 'duration': args.duration} # Add duration for scalar JOS-3
+        print("\nSimulating JOS-3 Water Loss (scalar rates)...")
+        jos3_scalar_results = run_monte_carlo_simulation(calculate_human_water_loss_jos3, base_jos3_scalar_mc_params, varied_sim_params_specs, args.num_simulations)
+        if jos3_scalar_results:
+            valid_sw = [r['SW_body_G_H'] for r in jos3_scalar_results if r and isinstance(r, dict) and r.get('SW_body_G_H') is not None]
+            if valid_sw: print(f"  JOS-3 'SW_body_G_H' Simulation Summary (Scalar, {len(valid_sw)} valid results): Mean={np.mean(valid_sw):.2f} g/h")
+            else: print("  No valid JOS-3 'SW_body_G_H' results from scalar simulation.")
+        else: print("  JOS-3 scalar simulation failed.")
+
+        base_jos3_timeseries_mc_params = {**base_jos3_sim_params_mc, 'duration_minutes': args.duration, 'output_interval_minutes': args.jos3_output_interval}
+        print("\n--- Monte Carlo Simulation for JOS-3 Time-Series ---")
+        all_jos3_sim_data = run_monte_carlo_simulation(get_jos3_time_series, base_jos3_timeseries_mc_params, varied_sim_params_specs, args.num_simulations)
+        if all_jos3_sim_data:
+            valid_jos3_outputs = [res for res in all_jos3_sim_data if res is not None and isinstance(res, dict)]
+            print(f"Completed {len(valid_jos3_outputs)} valid JOS-3 time-series simulations out of {args.num_simulations}.")
+            if valid_jos3_outputs and args.generate_plots:
+                plot_rectal_temperature_over_time(valid_jos3_outputs, os.path.join(args.plot_output_dir, "rectal_temp_simulation_plot.png"))
+                plot_water_consumption_over_time(valid_jos3_outputs, os.path.join(args.plot_output_dir, "water_loss_simulation_plot.png"))
+            elif not valid_jos3_outputs: print("No valid JOS-3 time-series simulation outputs to plot.")
+            elif valid_jos3_outputs and not args.generate_plots: print("JOS-3 time-series simulation data generated but plotting is disabled.")
+        else: print("JOS-3 time-series Monte Carlo simulation failed.")
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nProcess interrupted by user.")
+    except Exception as e:
+        print(f"\nAn unexpected error occurred: {e}")
+        # import traceback
+        # traceback.print_exc()
+    finally:
+        print("\nExiting application.")
+>>>>>>> REPLACE
+
+[end of meteo_comfort_project/main.py]
