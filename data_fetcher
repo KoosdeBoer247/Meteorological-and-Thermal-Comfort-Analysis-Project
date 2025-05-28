@@ -1,0 +1,298 @@
+import requests
+from typing import Tuple, Optional, Dict, Any, List # For Python 3.9+ use tuple, optional, dict
+from timezonefinder import TimezoneFinder # Added for timezone lookup
+
+# Instantiate TimezoneFinder at module level for efficiency
+tf = TimezoneFinder()
+
+# Placeholder for API Key for testing, if needed, but functions should accept it as an argument.
+# OPENWEATHER_API_KEY = "YOUR_ACTUAL_API_KEY" # Remember to not commit actual keys
+
+def get_coordinates(city_name: str, api_key: str) -> Optional[Tuple[float, float]]:
+    """
+    Retrieves the geographical coordinates (latitude and longitude) for a given city name
+    using the OpenWeatherMap Geocoding API.
+
+    Args:
+        city_name: The name of the city.
+        api_key: Your OpenWeatherMap API key.
+
+    Returns:
+        A tuple containing latitude and longitude (float, float) if the city is found,
+        otherwise None.
+    """
+    api_url = "http://api.openweathermap.org/geo/1.0/direct"
+    params = {
+        "q": city_name,
+        "limit": 1,
+        "appid": api_key,
+    }
+    try:
+        response = requests.get(api_url, params=params)
+        response.raise_for_status()  # Raises an HTTPError for bad responses (4XX or 5XX)
+        data = response.json()
+        if data and isinstance(data, list):
+            return float(data[0]["lat"]), float(data[0]["lon"])
+        else:
+            print(f"Error: City '{city_name}' not found or invalid response.")
+            return None
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching coordinates for '{city_name}': {e}")
+        return None
+    except (KeyError, IndexError, TypeError) as e:
+        print(f"Error parsing coordinate data for '{city_name}': {e}")
+        return None
+
+def get_weather_data(lat: float, lon: float, api_key: str, units: str = 'metric') -> Optional[Dict[str, Any]]:
+    """
+    Fetches current weather data for a given latitude and longitude using the
+    OpenWeatherMap API.
+
+    Args:
+        lat: Latitude in decimal degrees.
+        lon: Longitude in decimal degrees.
+        api_key: Your OpenWeatherMap API key.
+        units: Units of measurement. 'metric' for Celsius, 'imperial' for Fahrenheit.
+               Defaults to 'metric'.
+
+    Returns:
+        A dictionary containing weather data (temp, humidity, wind_speed, clouds)
+        if successful, otherwise None.
+    """
+    api_url = "https://api.openweathermap.org/data/2.5/weather"
+    params = {
+        "lat": lat,
+        "lon": lon,
+        "appid": api_key,
+        "units": units,
+    }
+    try:
+        response = requests.get(api_url, params=params)
+        response.raise_for_status() # Raises an HTTPError for bad responses (4XX or 5XX)
+        data = response.json()
+        if data:
+            weather_details = {
+                "temp": data.get("main", {}).get("temp"),
+                "humidity": data.get("main", {}).get("humidity"),
+                "wind_speed": data.get("wind", {}).get("speed"),
+                "clouds": data.get("clouds", {}).get("all"),
+            }
+            # Basic validation to ensure essential keys were found
+            if all(weather_details[key] is not None for key in ["temp", "humidity", "wind_speed", "clouds"]):
+                return weather_details
+            else:
+                print(f"Error: Incomplete weather data received for coordinates ({lat}, {lon}). Response: {data}")
+                return None
+        else:
+            print(f"Error: No weather data found for coordinates ({lat}, {lon}).")
+            return None
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching weather data for coordinates ({lat}, {lon}): {e}")
+        return None
+    except (KeyError, TypeError) as e:
+        print(f"Error parsing weather data for coordinates ({lat}, {lon}): {e}")
+        return None
+
+def get_5day_3hour_forecast(lat: float, lon: float, api_key: str, units: str = 'metric') -> Optional[List[Dict[str, Any]]]:
+    """
+    Fetches 5-day/3-hour weather forecast data from OpenWeather API.
+
+    Args:
+        lat (float): Latitude of the location.
+        lon (float): Longitude of the location.
+        api_key (str): OpenWeather API key.
+        units (str, optional): Units for temperature ('metric' or 'imperial'). Defaults to 'metric'.
+
+    Returns:
+        Optional[List[Dict[str, Any]]]: A list of dictionaries, where each dictionary
+                                       represents a 3-hour forecast slot, containing keys like
+                                       'dt_txt', 'temp', 'humidity', 'wind_speed', 'clouds'.
+                                       Returns None if an error occurs.
+    """
+    api_url = "https://api.openweathermap.org/data/2.5/forecast"
+    params = {
+        "lat": lat,
+        "lon": lon,
+        "appid": api_key,
+        "units": units,
+    }
+    processed_forecast_list = []
+    try:
+        response = requests.get(api_url, params=params)
+        response.raise_for_status() # Raises an HTTPError for bad responses (4XX or 5XX)
+        response_data = response.json()
+
+        for forecast_item in response_data.get('list', []):
+            processed_slot = {
+                'dt_txt': forecast_item.get('dt_txt'),
+                'temp': forecast_item.get('main', {}).get('temp'),
+                'feels_like': forecast_item.get('main', {}).get('feels_like'),
+                'temp_min': forecast_item.get('main', {}).get('temp_min'),
+                'temp_max': forecast_item.get('main', {}).get('temp_max'),
+                'pressure': forecast_item.get('main', {}).get('pressure'),
+                'humidity': forecast_item.get('main', {}).get('humidity'),
+                'weather_main': forecast_item.get('weather', [{}])[0].get('main'),
+                'weather_description': forecast_item.get('weather', [{}])[0].get('description'),
+                'clouds': forecast_item.get('clouds', {}).get('all'),
+                'wind_speed': forecast_item.get('wind', {}).get('speed'),
+                'wind_deg': forecast_item.get('wind', {}).get('deg'),
+                'visibility': forecast_item.get('visibility'),
+                'pop': forecast_item.get('pop') # Probability of precipitation
+            }
+            processed_forecast_list.append(processed_slot)
+        
+        if not processed_forecast_list and response_data.get('list') is not None: # list was present but empty
+             print(f"Warning: Forecast data list was empty for coordinates ({lat}, {lon}). API Response: {response_data}")
+        elif not processed_forecast_list: # list key was missing entirely or response_data was None
+             print(f"Error: No forecast 'list' found in API response for coordinates ({lat}, {lon}). API Response: {response_data}")
+             return None
+
+
+        return processed_forecast_list
+
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching 5-day forecast for coordinates ({lat}, {lon}): {e}")
+        return None
+    except (ValueError, TypeError, KeyError) as e: # ValueError for json parsing, others for dict access
+        print(f"Error parsing 5-day forecast data for coordinates ({lat}, {lon}): {e}")
+        return None
+
+
+def get_air_quality_index(lat: float, lon: float, api_key: str) -> Optional[Dict[str, Any]]:
+    """
+    Fetches current air quality index (AQI) data from OpenWeather API.
+
+    Args:
+        lat (float): Latitude of the location.
+        lon (float): Longitude of the location.
+        api_key (str): OpenWeather API key.
+
+    Returns:
+        Optional[Dict[str, Any]]: A dictionary containing the main AQI value (1-5 scale)
+                                 under the key 'aqi', and a dictionary of pollutant
+                                 component concentrations under the key 'components'.
+                                 Returns None if an error occurs.
+    """
+    api_url = "http://api.openweathermap.org/data/2.5/air_pollution"
+    params = {
+        "lat": lat,
+        "lon": lon,
+        "appid": api_key,
+    }
+    try:
+        response = requests.get(api_url, params=params)
+        response.raise_for_status()
+        response_data = response.json()
+
+        # The data is nested in a list, usually with one item
+        pollution_data_list = response_data.get('list')
+        if not pollution_data_list or not isinstance(pollution_data_list, list):
+            print(f"Error: 'list' field missing or not a list in AQI response for ({lat}, {lon}). Response: {response_data}")
+            return None
+        
+        pollution_data = pollution_data_list[0]
+
+        main_aqi = pollution_data.get('main', {}).get('aqi')
+        components = pollution_data.get('components', {})
+
+        if main_aqi is not None: # AQI must be present
+            return {'aqi': main_aqi, 'components': components}
+        else:
+            print(f"Error: Main AQI value not found in response for ({lat}, {lon}). Response: {pollution_data}")
+            return None
+
+    except requests.exceptions.RequestException as e:
+        print(f"Error fetching AQI data for coordinates ({lat}, {lon}): {e}")
+        return None
+    except (ValueError, TypeError, KeyError, IndexError) as e: # ValueError for json, IndexError for list access
+        print(f"Error parsing AQI data for coordinates ({lat}, {lon}): {e}")
+        return None
+
+
+def get_timezone_str(latitude: float, longitude: float) -> Optional[str]:
+    """
+    Determines the Olson timezone string for given geographic coordinates.
+
+    Args:
+        latitude (float): The latitude of the location.
+        longitude (float): The longitude of the location.
+
+    Returns:
+        Optional[str]: The Olson timezone string (e.g., 'America/New_York', 'Europe/London')
+                       if found, otherwise None.
+    """
+    if latitude is None or longitude is None:
+        # print("Error: Latitude or longitude cannot be None for timezone lookup.") # Optional print
+        return None
+    try:
+        timezone_name = tf.timezone_at(lng=longitude, lat=latitude)
+        return timezone_name
+    except Exception as e:
+        print(f"Error finding timezone for lat={latitude}, lon={longitude}: {e}")
+        return None
+
+# Example usage (optional, for basic testing within the module)
+if __name__ == '__main__':
+    # This part is for direct script execution testing and will not be part of the library code
+    # You'll need to manually insert an API key here to test
+    test_api_key = "YOUR_TEST_API_KEY"  # Replace with a real API key for testing
+    
+    print("--- Testing get_coordinates and get_weather_data ---")
+    if test_api_key == "YOUR_TEST_API_KEY" or not test_api_key:
+        print("Please replace 'YOUR_TEST_API_KEY' with an actual OpenWeather API key to test coordinate and weather fetching.")
+    else:
+        city = "London"
+        coords = get_coordinates(city, test_api_key)
+        if coords:
+            print(f"Coordinates for {city}: {coords}")
+            weather = get_weather_data(coords[0], coords[1], test_api_key)
+            if weather:
+                print(f"Weather in {city}: {weather}")
+        else:
+            print(f"Could not get coordinates for {city}.")
+
+    print("\n--- Testing get_timezone_str ---")
+    coords_london = (51.5074, 0.1278)
+    tz_london = get_timezone_str(coords_london[0], coords_london[1])
+    print(f"Timezone for London (lat={coords_london[0]}, lon={coords_london[1]}): {tz_london}")
+
+    coords_nyc = (40.7128, -74.0060)
+    tz_nyc = get_timezone_str(coords_nyc[0], coords_nyc[1])
+    print(f"Timezone for New York (lat={coords_nyc[0]}, lon={coords_nyc[1]}): {tz_nyc}")
+
+    coords_ocean = (0, 0) # Point in the Atlantic Ocean
+    tz_ocean = get_timezone_str(coords_ocean[0], coords_ocean[1])
+    print(f"Timezone for Ocean (lat={coords_ocean[0]}, lon={coords_ocean[1]}): {tz_ocean}")
+    
+    coords_invalid_lat_none = (None, 10.0)
+    tz_invalid_lat = get_timezone_str(coords_invalid_lat_none[0], coords_invalid_lat_none[1])
+    print(f"Timezone for invalid coords (lat={coords_invalid_lat_none[0]}, lon={coords_invalid_lat_none[1]}): {tz_invalid_lat}")
+    
+    # Example for a location where timezonefinder might return None but without error
+    # (e.g., Antarctica, though some parts have timezones)
+    coords_antarctica = (-80.0, 0.0) # A point in Antarctica
+    tz_antarctica = get_timezone_str(coords_antarctica[0], coords_antarctica[1])
+    print(f"Timezone for Antarctica (lat={coords_antarctica[0]}, lon={coords_antarctica[1]}): {tz_antarctica}")
+
+    print("\n--- Testing get_5day_3hour_forecast ---")
+    if test_api_key == "YOUR_TEST_API_KEY" or not test_api_key:
+        print("Skipping forecast test, API key not set.")
+    else:
+        forecast_data = get_5day_3hour_forecast(coords_london[0], coords_london[1], test_api_key)
+        if forecast_data:
+            print(f"Received {len(forecast_data)} forecast slots for London.")
+            for i, slot in enumerate(forecast_data[:3]): # Print first 3 slots
+                print(f"  Slot {i+1} ({slot.get('dt_txt')}): Temp={slot.get('temp')}°C, Clouds={slot.get('clouds')}%")
+        else:
+            print("Failed to get forecast data for London.")
+
+    print("\n--- Testing get_air_quality_index ---")
+    if test_api_key == "YOUR_TEST_API_KEY" or not test_api_key:
+        print("Skipping AQI test, API key not set.")
+    else:
+        aqi_data = get_air_quality_index(coords_london[0], coords_london[1], test_api_key)
+        if aqi_data:
+            print(f"AQI data for London: Main AQI = {aqi_data.get('aqi')}")
+            print(f"  Components: {aqi_data.get('components')}")
+        else:
+            print("Failed to get AQI data for London.")
