@@ -1,0 +1,313 @@
+import matplotlib.pyplot as plt
+import numpy as np
+from typing import List, Optional, Dict, Any, Tuple # Added Tuple for percentiles
+
+# This module will contain functions to generate plots for:
+# - Rectal temperature over time (with uncertainty)
+# - Water consumption over time (with uncertainty)
+# - Risk progression over time
+
+def plot_time_series_with_uncertainty(
+    time_minutes: List[float],
+    mean_series: List[float],
+    upper_bound_series: List[float],
+    lower_bound_series: List[float],
+    title: str,
+    y_label: str,
+    output_filename: str
+):
+    """
+    Plots a time series with a mean line and a shaded uncertainty band.
+
+    Args:
+        time_minutes: List of time points in minutes.
+        mean_series: List of mean values for the series.
+        upper_bound_series: List of upper bound values for the uncertainty band.
+        lower_bound_series: List of lower bound values for the uncertainty band.
+        title: Title of the plot.
+        y_label: Label for the Y-axis.
+        output_filename: Filename to save the plot (e.g., "plot.png").
+    """
+    plt.figure(figsize=(10, 6))
+    plt.plot(time_minutes, mean_series, label='Mean', color='blue')
+    plt.fill_between(time_minutes, lower_bound_series, upper_bound_series,
+                     color='blue', alpha=0.2, label='Uncertainty Band (e.g., 5th-95th percentile)')
+    plt.title(title)
+    plt.xlabel("Time (minutes)")
+    plt.ylabel(y_label)
+    plt.legend()
+    plt.grid(True)
+    try:
+        plt.savefig(output_filename)
+        print(f"Plot saved to {output_filename}")
+    except Exception as e:
+        print(f"Error saving plot {output_filename}: {e}")
+    plt.close()
+
+
+def plot_rectal_temperature_over_time(
+    all_sim_data: List[Dict[str, List[float]]],
+    output_filename: str,
+    key_time: str = "time_minutes",
+    key_value: str = "rectal_temp_c",
+    percentiles: Tuple[float, float] = (5, 95)
+):
+    """
+    Plots rectal temperature over time, showing mean and percentile-based uncertainty.
+
+    Args:
+        all_sim_data: A list of simulation outputs. Each item is a dictionary
+                      expected to contain keys for time series (e.g., 'time_minutes')
+                      and value series (e.g., 'rectal_temp_c'). Both should be lists of floats.
+        output_filename: Filename to save the plot.
+        key_time: Dictionary key for the time vector in each simulation dict.
+        key_value: Dictionary key for the value vector (rectal temp) in each simulation dict.
+        percentiles: Tuple of (lower, upper) percentiles for the uncertainty band.
+    """
+    if not all_sim_data:
+        print("Error plotting rectal temperature: No simulation data provided.")
+        return
+    if not all(isinstance(sim, dict) and key_time in sim and key_value in sim for sim in all_sim_data):
+        print(f"Error plotting rectal temperature: Data format incorrect. Expected list of dicts with keys '{key_time}' and '{key_value}'.")
+        return
+
+    try:
+        time_minutes = all_sim_data[0][key_time] # Assume all simulations have the same time vector
+        
+        # Ensure all value series have the same length as the time vector
+        value_series_list = []
+        for i, sim_data in enumerate(all_sim_data):
+            if len(sim_data[key_value]) == len(time_minutes):
+                value_series_list.append(sim_data[key_value])
+            else:
+                print(f"Warning: Simulation {i} has mismatched data length for '{key_value}'. Skipping.")
+        
+        if not value_series_list:
+            print(f"Error plotting rectal temperature: No valid data series found for key '{key_value}'.")
+            return
+
+        value_array = np.array(value_series_list)
+
+        mean_series = np.mean(value_array, axis=0).tolist()
+        lower_bound_series = np.percentile(value_array, percentiles[0], axis=0).tolist()
+        upper_bound_series = np.percentile(value_array, percentiles[1], axis=0).tolist()
+
+        plot_time_series_with_uncertainty(
+            time_minutes=time_minutes,
+            mean_series=mean_series,
+            upper_bound_series=upper_bound_series,
+            lower_bound_series=lower_bound_series,
+            title="Rectal Temperature Over Time",
+            y_label="Rectal Temperature (°C)",
+            output_filename=output_filename
+        )
+    except Exception as e:
+        print(f"An error occurred during rectal temperature plot generation: {e}")
+
+
+def plot_water_consumption_over_time(
+    all_sim_data: List[Dict[str, List[float]]],
+    output_filename: str,
+    key_time: str = "time_minutes",
+    key_value: str = "water_loss_ml_cumulative",
+    percentiles: Tuple[float, float] = (5, 95)
+):
+    """
+    Plots cumulative water consumption over time, showing mean and percentile-based uncertainty.
+
+    Args:
+        all_sim_data: A list of simulation outputs. Each item is a dictionary
+                      expected to contain keys for time series (e.g., 'time_minutes')
+                      and value series (e.g., 'water_loss_ml_cumulative'). Both should be lists of floats.
+        output_filename: Filename to save the plot.
+        key_time: Dictionary key for the time vector in each simulation dict.
+        key_value: Dictionary key for the value vector (water consumption) in each simulation dict.
+        percentiles: Tuple of (lower, upper) percentiles for the uncertainty band.
+    """
+    if not all_sim_data:
+        print("Error plotting water consumption: No simulation data provided.")
+        return
+    if not all(isinstance(sim, dict) and key_time in sim and key_value in sim for sim in all_sim_data):
+        print(f"Error plotting water consumption: Data format incorrect. Expected list of dicts with keys '{key_time}' and '{key_value}'.")
+        return
+
+    try:
+        time_minutes = all_sim_data[0][key_time] # Assume all simulations have the same time vector
+        
+        value_series_list = []
+        for i, sim_data in enumerate(all_sim_data):
+            if len(sim_data[key_value]) == len(time_minutes):
+                value_series_list.append(sim_data[key_value])
+            else:
+                print(f"Warning: Simulation {i} has mismatched data length for '{key_value}'. Skipping.")
+
+        if not value_series_list:
+            print(f"Error plotting water consumption: No valid data series found for key '{key_value}'.")
+            return
+            
+        value_array = np.array(value_series_list)
+
+        mean_series = np.mean(value_array, axis=0).tolist()
+        lower_bound_series = np.percentile(value_array, percentiles[0], axis=0).tolist()
+        upper_bound_series = np.percentile(value_array, percentiles[1], axis=0).tolist()
+
+        plot_time_series_with_uncertainty(
+            time_minutes=time_minutes,
+            mean_series=mean_series,
+            upper_bound_series=upper_bound_series,
+            lower_bound_series=lower_bound_series,
+            title="Cumulative Water Consumption Over Time",
+            y_label="Water Consumption (ml)",
+            output_filename=output_filename
+        )
+    except Exception as e:
+        print(f"An error occurred during water consumption plot generation: {e}")
+
+
+def plot_risk_progression(
+    time_minutes: List[float],
+    overall_risk_levels_series: List[int], # Numerical risk levels
+    output_filename: str,
+    risk_level_map: Optional[Dict[int, str]] = None # e.g., {0: "Low", 1: "Mod", ...}
+):
+    """
+    Plots the progression of overall risk levels over time.
+
+    Args:
+        time_minutes: List of time points in minutes.
+        overall_risk_levels_series: List of numerical overall risk levels corresponding to each time point.
+        output_filename: Filename to save the plot.
+        risk_level_map: Optional dictionary to map numerical risk levels to string labels for the Y-axis.
+    """
+    if not time_minutes or not overall_risk_levels_series:
+        print("Error plotting risk progression: Time or risk data is empty.")
+        return
+    if len(time_minutes) != len(overall_risk_levels_series):
+        print("Error plotting risk progression: Time and risk data lists must have the same length.")
+        return
+
+    plt.figure(figsize=(10, 6))
+    plt.step(time_minutes, overall_risk_levels_series, where='post', label='Overall Risk Level')
+    plt.title("Overall Risk Progression Over Time")
+    plt.xlabel("Time (minutes)")
+    plt.ylabel("Overall Risk Level")
+
+    if risk_level_map and isinstance(risk_level_map, dict) and risk_level_map:
+        # Ensure keys in map cover the range of values in overall_risk_levels_series for meaningful ticks
+        # Or, more robustly, set ticks based on unique values present in the data if map is partial
+        unique_risk_values_in_data = sorted(list(set(overall_risk_levels_series)))
+        
+        # Use only levels present in the data for ticks, and get labels from map if available
+        tick_levels = [lvl for lvl in unique_risk_values_in_data if lvl in risk_level_map]
+        tick_labels = [risk_level_map[lvl] for lvl in tick_levels]
+
+        if not tick_levels: # Fallback if map doesn't cover data or is empty
+             # Add 0 to max_risk +1 to set y-axis limits and ticks
+            min_risk_val = min(overall_risk_levels_series)
+            max_risk_val = max(overall_risk_levels_series)
+            plt.yticks(np.arange(min_risk_val, max_risk_val + 1))
+        else:
+            plt.yticks(tick_levels, tick_labels)
+            # Optionally, set y-limits to ensure all categories are somewhat visible
+            # if risk_level_map:
+            #   all_map_levels = sorted(risk_level_map.keys())
+            #   plt.ylim(min(all_map_levels) - 0.5, max(all_map_levels) + 0.5)
+
+
+    plt.grid(True, axis='y', linestyle='--') # Grid on y-axis can be helpful for discrete levels
+    plt.legend()
+    try:
+        plt.savefig(output_filename)
+        print(f"Plot saved to {output_filename}")
+    except Exception as e:
+        print(f"Error saving plot {output_filename}: {e}")
+    plt.close()
+
+
+if __name__ == '__main__':
+    print("Generating example plots for plotting.py...")
+
+    # --- Sample Data for plot_rectal_temperature_over_time and plot_water_consumption_over_time ---
+    num_simulations = 5
+    num_time_points = 10
+    sample_time = [i * 5 for i in range(num_time_points)] # 0, 5, 10, ..., 45 minutes
+
+    sample_sim_data_temp = []
+    sample_sim_data_water = []
+
+    for _ in range(num_simulations):
+        # Simulate some variation for rectal temperature
+        base_temp = 37.0
+        temp_rise = np.cumsum(np.random.rand(num_time_points) * 0.05) # Gradual rise
+        noise_temp = np.random.randn(num_time_points) * 0.1 # Some noise
+        rectal_temps = base_temp + temp_rise + noise_temp
+        
+        # Simulate some variation for water loss
+        base_loss_rate_ml_per_min = np.random.uniform(3, 7) # Vary base rate per "simulation"
+        cumulative_loss = np.cumsum(np.random.rand(num_time_points) * base_loss_rate_ml_per_min)
+        
+        sim_dict_temp = {"time_minutes": sample_time, "rectal_temp_c": rectal_temps.tolist()}
+        sim_dict_water = {"time_minutes": sample_time, "water_loss_ml_cumulative": cumulative_loss.tolist()}
+        
+        sample_sim_data_temp.append(sim_dict_temp)
+        sample_sim_data_water.append(sim_dict_water)
+
+    # Test plot_rectal_temperature_over_time
+    plot_rectal_temperature_over_time(
+        all_sim_data=sample_sim_data_temp,
+        output_filename="test_rectal_temp_plot.png"
+    )
+
+    # Test plot_water_consumption_over_time
+    plot_water_consumption_over_time(
+        all_sim_data=sample_sim_data_water,
+        output_filename="test_water_loss_plot.png"
+    )
+
+    # --- Sample Data for plot_risk_progression ---
+    # Using OVERALL_RISK constants from risk_assessment module (conceptual)
+    # For direct use here, we can define a simplified map or use the numerical values
+    # from risk_assessment.py (OVERALL_RISK_NONE_LOW=0, MODERATE=1, HIGH=2, VERY_HIGH=3, EXTREME=4)
+    sample_risk_series = [0, 0, 1, 1, 2, 2, 2, 3, 3, 4] 
+    sample_risk_map = {
+        0: "None/Low",
+        1: "Moderate",
+        2: "High",
+        3: "Very High",
+        4: "Extreme"
+    }
+    
+    # Ensure sample_time matches length of sample_risk_series
+    if len(sample_time) != len(sample_risk_series):
+        # Adjust sample_time or sample_risk_series to match for the example
+        # For simplicity, let's assume they are matched or regenerate one if needed
+        # This case should be handled by the function's internal checks for real data
+        print(f"Warning: Sample time length ({len(sample_time)}) and risk series length ({len(sample_risk_series)}) mismatch for example. Adjusting.")
+        # Example adjustment:
+        if len(sample_time) > len(sample_risk_series):
+            sample_time_for_risk = sample_time[:len(sample_risk_series)]
+        else:
+            # This would be more complex if risk series is shorter, requires padding or re-eval.
+            # For this example, we'll assume the risk series is what defines the number of points.
+            sample_time_for_risk = [i * 5 for i in range(len(sample_risk_series))]
+
+    else:
+        sample_time_for_risk = sample_time
+
+
+    # Test plot_risk_progression
+    plot_risk_progression(
+        time_minutes=sample_time_for_risk,
+        overall_risk_levels_series=sample_risk_series,
+        output_filename="test_risk_progression_plot.png",
+        risk_level_map=sample_risk_map
+    )
+    
+    # Test plot_risk_progression without map
+    plot_risk_progression(
+        time_minutes=sample_time_for_risk,
+        overall_risk_levels_series=sample_risk_series,
+        output_filename="test_risk_progression_no_map_plot.png"
+    )
+
+    print("Example plots generation attempted.")
